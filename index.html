@@ -1203,8 +1203,15 @@ function saveCredentials() {
 // ══════════ DATA ══════════
 let pedidos = [];
 let inventario = [];
-let pedidosEliminados = new Set(); // IDs eliminados en esta sesión
-let inventarioEliminado = new Set();
+let pedidosEliminados = new Set(JSON.parse(localStorage.getItem('pedidosEliminados') || '[]'));
+let inventarioEliminado = new Set(JSON.parse(localStorage.getItem('inventarioEliminado') || '[]'));
+
+function persistirEliminados() {
+  try {
+    localStorage.setItem('pedidosEliminados', JSON.stringify([...pedidosEliminados]));
+    localStorage.setItem('inventarioEliminado', JSON.stringify([...inventarioEliminado]));
+  } catch(e) {}
+}
 let sheetsUrl = localStorage.getItem('sheetsUrl') || 'https://script.google.com/macros/s/AKfycbzkR69yM_vZuwNp6_4KejpkHS_Ds3yKFAbhy_xwNtFigTKgJa-Nd9OMT3Y3TFl3tYZ2/exec';
 let editingPedidoId = null;
 let editingInvId = null;
@@ -1282,21 +1289,40 @@ async function save() {
     if (pedidosFusionados.length === 0 && pedidosSheets.length > 0) {
       pedidos = pedidosSheets;
       inventario = inventarioFusionado.length > 0 ? inventarioFusionado : inventarioSheets;
+      mostrarGuardando(false); // ✅ Fix #5: no quedaba el spinner visible
       return;
     }
 
     // 4. Guardar la versión fusionada en Sheets
-    await fetch(sheetsUrl, {
+    const postRes = await fetch(sheetsUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify({ action: 'saveAll', pedidos: pedidosFusionados, inventario: inventarioFusionado })
     });
+    const postData = await postRes.json().catch(() => ({ ok: false }));
 
-    // 4. Actualizar memoria local con la versión fusionada
+    // Si el servidor rechazó el guardado, no actualizar la memoria local
+    if (postData.ok === false) {
+      console.warn('Sheets rechazó el guardado:', postData.error);
+      // Cargar desde Sheets para tener el estado correcto
+      if (pedidosSheets.length > 0) {
+        pedidos    = pedidosSheets;
+        inventario = inventarioSheets.length > 0 ? inventarioSheets : inventario;
+        renderAll();
+      }
+      mostrarGuardando(false);
+      return;
+    }
+
+    // 5. Actualizar memoria local con la versión fusionada (solo si el servidor confirmó)
     pedidos    = pedidosFusionados;
     inventario = inventarioFusionado;
     localStorage.removeItem('pedidos');
     localStorage.removeItem('inventario');
+    // Limpiar Sets de eliminados ya que la fusión fue exitosa
+    pedidosEliminados.clear();
+    inventarioEliminado.clear();
+    persistirEliminados();
 
   } catch(e) {
     // silencioso — sin conexión, datos guardados localmente
@@ -1332,11 +1358,19 @@ async function cargarDatos() {
       if (Array.isArray(data.pedidos) && data.pedidos.length > 0) {
         pedidos    = data.pedidos;
         inventario = data.inventario || [];
-        // Limpiar cualquier caché local que pueda generar conflictos
         localStorage.removeItem('pedidos');
         localStorage.removeItem('inventario');
         localStorage.removeItem('pedidos_pendiente');
         localStorage.removeItem('inventario_pendiente');
+        showLoading(false);
+        return;
+      } else if (Array.isArray(data.pedidos) && data.pedidos.length === 0) {
+        // Sheets devolvió 0 pedidos — puede ser un error, no cargamos
+        // Intentar usar caché local si existe
+        const pLocal = localStorage.getItem('pedidos_pendiente') || localStorage.getItem('pedidos');
+        if (pLocal) {
+          try { pedidos = JSON.parse(pLocal); } catch(e) {}
+        }
         showLoading(false);
         return;
       }
@@ -1578,6 +1612,7 @@ function editPedido(id) { openPedidoModal(id); }
 async function deletePedido(id) {
   if (!confirm('¿Eliminar este pedido?')) return;
   pedidosEliminados.add(id);
+  persistirEliminados();
   pedidos = pedidos.filter(p=>p.id!==id);
   await save(); renderPedidos(); toast('Pedido eliminado','success');
 }
@@ -1769,28 +1804,28 @@ function getProductosTexto() {
   }).filter(Boolean).join('\n');
 }
 
-async function descontarStock(lineas) {
+function descontarStock(lineas) {
+  // Solo modifica el inventario en memoria — el save() lo hace quien llama esta función
   lineas.forEach(l => {
-    if (l.tipo === 'colaborador') return; // no afecta inventario
+    if (l.tipo === 'colaborador') return;
     const item = inventario.find(i=>i.id==l.prodId);
     if (item) {
       item.stock = Math.max(0, Number(item.stock||0) - Number(l.cantidad||1));
       if (item.stock === 0) item.situacion = 'No disponible';
     }
   });
-  await save(); // ✅ Fix #1: await agregado
 }
 
-async function revertirStock(lineas) {
+function revertirStock(lineas) {
+  // Solo modifica el inventario en memoria — el save() lo hace quien llama esta función
   lineas.forEach(l => {
-    if (l.tipo === 'colaborador') return; // no afecta inventario
+    if (l.tipo === 'colaborador') return;
     const item = inventario.find(i=>i.id==l.prodId);
     if (item) {
       item.stock = Number(item.stock||0) + Number(l.cantidad||1);
       if (item.stock > 0) item.situacion = 'Disponible';
     }
   });
-  await save(); // ✅ Fix #1: await agregado
 }
 
 async function savePedido() {
@@ -1832,7 +1867,7 @@ async function savePedido() {
   }
 
   const obj = {
-    id: editingPedidoId || Date.now(),
+    id: editingPedidoId || (Date.now() * 1000 + Math.floor(Math.random() * 1000)),
     cliente,
     plataforma: document.getElementById('p-plataforma').value,
     entrega: document.getElementById('p-entrega').value,
@@ -1858,15 +1893,13 @@ async function savePedido() {
 
     // Siempre revertir stock anterior si fue descontado, independiente del nuevo estado
     if (anterior.stockDescontado) {
-      await revertirStock(anterior.lineas||[]); // ✅ Fix #2: await agregado
+      revertirStock(anterior.lineas||[]);
       obj.stockDescontado = false;
     }
 
-    // Si el nuevo estado es Liquidado (cualquier variante), descontar el stock nuevo
-    // Esto cubre: cambio de productos, cambio de cantidades, o cambio de estado
     const esLiquidado = nuevoEstado.startsWith('Liquidado');
     if (esLiquidado) {
-      await descontarStock(lineasValidas); // ✅ Fix #2: await agregado
+      descontarStock(lineasValidas);
       obj.stockDescontado = true;
       renderInventario();
     }
@@ -1878,7 +1911,7 @@ async function savePedido() {
     // Pedido nuevo
     const esLiquidado = nuevoEstado.startsWith('Liquidado');
     if (esLiquidado) {
-      await descontarStock(lineasValidas); // ✅ Fix #2: await agregado
+      descontarStock(lineasValidas);
       obj.stockDescontado = true;
       renderInventario();
     }
@@ -2020,6 +2053,7 @@ async function confirmarFusion(destinoId) {
 
   // 3. Eliminar el producto origen
   inventarioEliminado.add(fusionOrigenId);
+  persistirEliminados();
   inventario = inventario.filter(i => i.id !== fusionOrigenId);
 
   closeModal('modal-fusion');
@@ -2092,6 +2126,7 @@ function editInv(id) { openInvModal(id); }
 async function deleteInv(id) {
   if (!confirm('¿Eliminar este producto?')) return;
   inventarioEliminado.add(id);
+  persistirEliminados();
   inventario = inventario.filter(i=>i.id!==id);
   await save(); renderInventario(); toast('Producto eliminado','success');
 }
@@ -2203,7 +2238,7 @@ async function syncSheets() {
   try {
     const res = await fetch(sheetsUrl + '?action=getAll', { cache: 'no-store' });
     const data = await res.json();
-    if (Array.isArray(data.pedidos)) {
+    if (Array.isArray(data.pedidos) && data.pedidos.length > 0) {
       pedidos    = data.pedidos;
       inventario = data.inventario || [];
       try { await dbSet('pedidos', pedidos);       } catch(e) {}
@@ -2211,7 +2246,10 @@ async function syncSheets() {
       try { localStorage.setItem('pedidos',    JSON.stringify(pedidos));    } catch(e) {}
       try { localStorage.setItem('inventario', JSON.stringify(inventario)); } catch(e) {}
       renderAll();
-      toast('Datos sincronizados desde Sheets ✓', 'success');
+      toast('Datos sincronizados desde Sheets ✓ (' + pedidos.length + ' pedidos)', 'success');
+    } else if (Array.isArray(data.pedidos) && data.pedidos.length === 0) {
+      // Sheets devolvió lista vacía — no sobreescribir datos locales
+      toast('⚠️ Sheets devolvió 0 pedidos — sincronización cancelada para proteger los datos', 'error');
     } else {
       toast('Sheets no devolvió datos válidos', 'error');
     }
