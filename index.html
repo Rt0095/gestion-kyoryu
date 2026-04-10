@@ -1778,7 +1778,7 @@ async function descontarStock(lineas) {
       if (item.stock === 0) item.situacion = 'No disponible';
     }
   });
-  save();
+  await save(); // ✅ Fix #1: await agregado
 }
 
 async function revertirStock(lineas) {
@@ -1790,7 +1790,7 @@ async function revertirStock(lineas) {
       if (item.stock > 0) item.situacion = 'Disponible';
     }
   });
-  save();
+  await save(); // ✅ Fix #1: await agregado
 }
 
 async function savePedido() {
@@ -1858,7 +1858,7 @@ async function savePedido() {
 
     // Siempre revertir stock anterior si fue descontado, independiente del nuevo estado
     if (anterior.stockDescontado) {
-      revertirStock(anterior.lineas||[]);
+      await revertirStock(anterior.lineas||[]); // ✅ Fix #2: await agregado
       obj.stockDescontado = false;
     }
 
@@ -1866,7 +1866,7 @@ async function savePedido() {
     // Esto cubre: cambio de productos, cambio de cantidades, o cambio de estado
     const esLiquidado = nuevoEstado.startsWith('Liquidado');
     if (esLiquidado) {
-      descontarStock(lineasValidas);
+      await descontarStock(lineasValidas); // ✅ Fix #2: await agregado
       obj.stockDescontado = true;
       renderInventario();
     }
@@ -1878,7 +1878,7 @@ async function savePedido() {
     // Pedido nuevo
     const esLiquidado = nuevoEstado.startsWith('Liquidado');
     if (esLiquidado) {
-      descontarStock(lineasValidas);
+      await descontarStock(lineasValidas); // ✅ Fix #2: await agregado
       obj.stockDescontado = true;
       renderInventario();
     }
