@@ -1319,9 +1319,13 @@ async function save() {
     inventario = inventarioFusionado;
     localStorage.removeItem('pedidos');
     localStorage.removeItem('inventario');
-    // Limpiar Sets de eliminados ya que la fusión fue exitosa
-    pedidosEliminados.clear();
-    inventarioEliminado.clear();
+    // Solo limpiar los Sets de eliminados que ya fueron procesados en esta fusión
+    // NO limpiar completamente — pueden haber eliminaciones nuevas pendientes de otros dispositivos
+    // Solo eliminamos los IDs que ya están confirmados como no presentes en la versión fusionada
+    const idsFusionados = new Set(pedidosFusionados.map(p => p.id));
+    const idsInvFusionados = new Set(inventarioFusionado.map(i => i.id));
+    pedidosEliminados.forEach(id => { if (!idsFusionados.has(id)) pedidosEliminados.delete(id); });
+    inventarioEliminado.forEach(id => { if (!idsInvFusionados.has(id)) inventarioEliminado.delete(id); });
     persistirEliminados();
 
   } catch(e) {
