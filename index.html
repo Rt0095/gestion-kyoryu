@@ -2097,11 +2097,11 @@ function renderInventario() {
   }).join('');
 }
 
-function ajustarStock(id, delta) {
+async function ajustarStock(id, delta) {
   const item = inventario.find(i=>i.id===id);
   if (!item) return;
   item.stock = Math.max(0, Number(item.stock||0) + delta);
-  save(); renderInventario();
+  await save(); renderInventario();
 }
 
 function openInvModal(id=null) {
@@ -2149,7 +2149,7 @@ async function saveInv() {
   }
 
   const obj = {
-    id: editingInvId || Date.now(),
+    id: editingInvId || (Date.now() * 1000 + Math.floor(Math.random() * 1000)),
     nombre,
     categoria: document.getElementById('inv-categoria').value.trim(),
     precio: Number(document.getElementById('inv-precio').value||0),
