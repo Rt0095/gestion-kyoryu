@@ -1269,6 +1269,20 @@ async function save() {
       }
     } catch(e) { /* si no hay conexión, continuar con datos locales */ }
 
+    // Si Sheets devolvió 0 pedidos pero sabemos que había datos,
+    // reintentar una vez más antes de fusionar — Apps Script puede estar despertando
+    if (pedidosSheets.length === 0 && pedidos.length > 0) {
+      try {
+        await new Promise(r => setTimeout(r, 2000));
+        const res2 = await fetch(sheetsUrl + '?action=getAll', { cache: 'no-store' });
+        const data2 = await res2.json();
+        if (Array.isArray(data2.pedidos) && data2.pedidos.length > 0) {
+          pedidosSheets    = data2.pedidos;
+          inventarioSheets = data2.inventario || [];
+        }
+      } catch(e2) { /* si falla el reintento, continuar con lo que hay */ }
+    }
+
     // 2. Fusionar: los pedidos e inventario locales tienen prioridad
     //    Se conservan los del otro dispositivo que no existen aquí
     //    EXCEPTO los que fueron eliminados explícitamente en esta sesión
@@ -1352,38 +1366,50 @@ function mostrarGuardando(on) {
 }
 
 // Carga datos: SIEMPRE desde Sheets si está disponible
-// El caché local NUNCA sobrescribe Sheets — solo se usa si no hay conexión
+// Reintenta hasta 3 veces si Apps Script devuelve vacío (puede estar despertando)
 async function cargarDatos() {
   if (sheetsUrl) {
-    try {
-      showLoading(true);
-      const res = await fetch(sheetsUrl + '?action=getAll', { cache: 'no-store' });
-      const data = await res.json();
-      if (Array.isArray(data.pedidos) && data.pedidos.length > 0) {
-        pedidos    = data.pedidos;
-        inventario = data.inventario || [];
-        localStorage.removeItem('pedidos');
-        localStorage.removeItem('inventario');
-        localStorage.removeItem('pedidos_pendiente');
-        localStorage.removeItem('inventario_pendiente');
-        showLoading(false);
-        return;
-      } else if (Array.isArray(data.pedidos) && data.pedidos.length === 0) {
-        // Sheets devolvió 0 pedidos — puede ser un error, no cargamos
-        // Intentar usar caché local si existe
-        const pLocal = localStorage.getItem('pedidos_pendiente') || localStorage.getItem('pedidos');
-        if (pLocal) {
-          try { pedidos = JSON.parse(pLocal); } catch(e) {}
+    for (let intento = 1; intento <= 3; intento++) {
+      try {
+        showLoading(true);
+        const res = await fetch(sheetsUrl + '?action=getAll', { cache: 'no-store' });
+        const data = await res.json();
+
+        if (Array.isArray(data.pedidos) && data.pedidos.length > 0) {
+          // ✅ Datos cargados correctamente
+          pedidos    = data.pedidos;
+          inventario = data.inventario || [];
+          localStorage.removeItem('pedidos');
+          localStorage.removeItem('inventario');
+          localStorage.removeItem('pedidos_pendiente');
+          localStorage.removeItem('inventario_pendiente');
+          showLoading(false);
+          return;
         }
-        showLoading(false);
-        return;
+
+        if (Array.isArray(data.pedidos) && data.pedidos.length === 0) {
+          // Sheets devolvió 0 pedidos — puede ser que el script acaba de despertar
+          if (intento < 3) {
+            await new Promise(r => setTimeout(r, 2000 * intento)); // 2s, 4s
+            continue;
+          }
+          // Último intento fallido: usar caché local si existe
+          const pLocal = localStorage.getItem('pedidos_pendiente') || localStorage.getItem('pedidos');
+          if (pLocal) { try { pedidos = JSON.parse(pLocal); } catch(e) {} }
+          showLoading(false);
+          return;
+        }
+
+      } catch(e) {
+        if (intento < 3) {
+          await new Promise(r => setTimeout(r, 2000 * intento));
+          continue;
+        }
       }
-    } catch(e) {
-      // silencioso — fallo de red manejado internamente
     }
     showLoading(false);
   }
-  // Sin conexión: intentar subir datos pendientes que no se guardaron
+  // Sin conexión: usar caché local
   const pPend = localStorage.getItem('pedidos_pendiente');
   const iPend = localStorage.getItem('inventario_pendiente');
   if (pPend) { try { pedidos    = JSON.parse(pPend); } catch(e) {} }
@@ -2284,6 +2310,15 @@ function toast(msg, type='success') {
 document.querySelectorAll('.modal-overlay').forEach(o => {
   o.addEventListener('click', e => { if(e.target===o) o.classList.remove('open'); });
 });
+
+// ── Evitar que el scroll del mouse cambie valores en inputs numéricos ──
+// El comportamiento nativo de type="number" sube/baja el valor con el scroll,
+// lo que causa cambios accidentales al desplazarse por la página
+document.addEventListener('wheel', function(e) {
+  if (document.activeElement && document.activeElement.type === 'number') {
+    document.activeElement.blur();
+  }
+}, { passive: true });
 
 // ── TEMA CLARO / OSCURO por hora ──
 function aplicarTema() {
